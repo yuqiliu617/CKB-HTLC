@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 ckb-hash = "0.202.0"
 ckb-std = "0.18.0"
+secp256k1 = { version = "0.31.1", features = ["recovery", "global-context"] }
 
 [features]
 library = []
