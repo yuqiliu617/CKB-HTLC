@@ -1,0 +1,12 @@
+[package]
+name = "htlc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-hash = "0.202.0"
+ckb-std = "0.18.0"
+
+[features]
+library = []
+native-simulator = ["library", "ckb-std/native-simulator"]
