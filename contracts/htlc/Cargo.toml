@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ckb-hash = "0.202.0"
+ckb-hash = { version = "0.202.0", default-features = false, features = [
+	"ckb-contract",
+] }
 ckb-std = "0.18.0"
-secp256k1 = { version = "0.31.1", features = ["recovery", "global-context"] }
+k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
 
 [features]
 library = []

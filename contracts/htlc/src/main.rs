@@ -12,10 +12,7 @@ use ckb_std::{
     error::SysError,
     high_level::{load_script, load_transaction, load_witness_args, QueryIter},
 };
-use secp256k1::{
-    ecdsa::{RecoverableSignature, RecoveryId},
-    Message,
-};
+use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
 
 #[cfg(not(any(feature = "library", test)))]
 ckb_std::entry!(program_entry);
@@ -295,17 +292,17 @@ fn verify_signature(signature: &[u8], pubkey_hash: &[u8]) -> Result<(), Error> {
         message_data.extend_from_slice(&hash);
     }
     let message_hash = blake2b_256(&message_data);
-    let message = Message::from_digest(message_hash);
 
     // Recover the public key
-    let recovery_id = RecoveryId::from_u8_masked(signature[SIGNATURE_SIZE - 1]);
-    let sig = RecoverableSignature::from_compact(&signature[0..64], recovery_id)
+    let k256sig =
+        K256Signature::from_slice(&signature[0..64]).map_err(|_| Error::SignatureInvalid)?;
+    let recovery_id = RecoveryId::from_byte(signature[SIGNATURE_SIZE - 1]).unwrap();
+    let pubkey = VerifyingKey::recover_from_prehash(&message_hash, &k256sig, recovery_id)
         .map_err(|_| Error::SignatureInvalid)?;
-    let pubkey = sig.recover(message).map_err(|_| Error::SignatureInvalid)?;
 
     // Verify the public key hash
-    let actual_pubkey_hash = blake2b_256(&pubkey.serialize()[1..]);
-    if actual_pubkey_hash.as_slice() != pubkey_hash {
+    let actual_pubkey_hash = blake2b_256(&pubkey.to_encoded_point(false).as_bytes()[1..]);
+    if &actual_pubkey_hash[0..PUBKEY_HASH_SIZE] != pubkey_hash {
         return Err(Error::SignatureInvalid);
     }
 
