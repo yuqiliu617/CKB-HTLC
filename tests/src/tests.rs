@@ -94,7 +94,6 @@ impl ScriptArgs {
     }
 }
 
-// Creates witness data for claim (signature + preimages)
 fn build_claim_witness(
     signature: &[u8; SIGNATURE_SIZE],
     preimage1: &[u8; PREIMAGE_SIZE],
@@ -107,38 +106,19 @@ fn build_claim_witness(
     Bytes::from(witness_data)
 }
 
-fn sign_claim_tx(
+fn sign_tx(
     tx: TransactionView,
     context: &mut Context,
     signer: &KeyPair,
-    preimages: ([u8; PREIMAGE_SIZE], [u8; PREIMAGE_SIZE]),
+    build_witness: impl Fn(&[u8; SIGNATURE_SIZE]) -> Bytes,
 ) -> Result<TransactionView, SigError> {
     let complete_tx = context.complete_tx(tx);
 
     let tx_hash = complete_tx.hash();
     let signature = signer.sign(tx_hash.as_slice().try_into().unwrap())?;
 
-    let witness = build_claim_witness(&signature, &preimages.0, &preimages.1);
-    let witness_args = WitnessArgs::new_builder()
-        .lock(Some(witness).pack())
-        .build();
-    Ok(complete_tx
-        .as_advanced_builder()
-        .witness(witness_args.as_bytes().pack())
-        .build())
-}
-
-fn sign_refund_tx(
-    tx: TransactionView,
-    context: &mut Context,
-    signer: &KeyPair,
-) -> Result<TransactionView, SigError> {
-    let complete_tx = context.complete_tx(tx);
-
-    let tx_hash = complete_tx.hash();
-    let signature = signer.sign(tx_hash.as_slice().try_into().unwrap())?;
-
-    let witness = Bytes::from(signature.to_vec());
+    // let witness = Bytes::from(signature.to_vec());
+    let witness = build_witness(&signature);
     let witness_args = WitnessArgs::new_builder()
         .lock(Some(witness).pack())
         .build();
@@ -149,14 +129,13 @@ fn sign_refund_tx(
         .build())
 }
 
-#[test]
-fn test_htlc_claim_success() {
+fn setup_test_context(since: u64, capacity: u64) -> (Context, ScriptArgs, OutPoint) {
     // Setup
     let mut context = Context::default();
     let contract_bin: Bytes = Loader::default().load_binary("htlc");
     let out_point = context.deploy_cell(contract_bin);
 
-    let script_args = ScriptArgs::new(1000);
+    let script_args = ScriptArgs::new(since);
     let args = script_args.build_args();
 
     // Create script
@@ -167,13 +146,30 @@ fn test_htlc_claim_success() {
     // Create HTLC cell with funds
     let input_out_point = context.create_cell(
         CellOutput::new_builder()
-            .capacity(1000u64.pack())
+            .capacity(capacity.pack())
             .lock(lock_script.clone())
             .build(),
         Bytes::new(),
     );
 
-    // Setup transaction
+    (context, script_args, input_out_point)
+}
+
+macro_rules! create_tx {
+    ($input:expr, $output:expr) => {
+        TransactionBuilder::default()
+            .input($input)
+            .output($output)
+            .output_data(Bytes::new().pack())
+            .build()
+    };
+}
+
+#[test]
+fn test_htlc_claim_success() {
+    let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
+
+    // Create input cell
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
@@ -193,52 +189,26 @@ fn test_htlc_claim_success() {
         .build();
 
     // Build transaction
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .output(output)
-        .output_data(Bytes::new().pack())
-        .build();
-    let tx = sign_claim_tx(
-        tx,
-        &mut context,
-        &script_args.payee,
-        (
-            script_args.preimages.0.preimage,
-            script_args.preimages.1.preimage,
-        ),
-    )
+    let tx = create_tx!(input, output);
+    let tx = sign_tx(tx, &mut context, &script_args.payee, |s| {
+        build_claim_witness(
+            s,
+            &script_args.preimages.0.preimage,
+            &script_args.preimages.1.preimage,
+        )
+    })
     .expect("sign tx");
 
-    // Verify (should pass)
+    // Verify
     let cycles = verify_and_dump_failed_tx(&context, &tx, 10_000_000).expect("pass verification");
     println!("Claim success cycles: {}", cycles);
 }
 
 #[test]
 fn test_htlc_refund_success() {
-    // Setup
-    let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("htlc");
-    let out_point = context.deploy_cell(contract_bin);
+    let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
 
-    let script_args = ScriptArgs::new(1000);
-    let args = script_args.build_args();
-
-    // Create script
-    let lock_script = context
-        .build_script(&out_point, args)
-        .expect("build script");
-
-    // Create HTLC cell with funds
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000u64.pack())
-            .lock(lock_script.clone())
-            .build(),
-        Bytes::new(),
-    );
-
-    // Setup transaction
+    // Create input cell
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .since(script_args.since.pack()) // Set since value to match or exceed the locktime
@@ -259,45 +229,22 @@ fn test_htlc_refund_success() {
         .build();
 
     // Build transaction
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .output(output)
-        .output_data(Bytes::new().pack())
-        .build();
-    let tx = sign_refund_tx(tx, &mut context, &script_args.payer).expect("sign tx");
+    let tx = create_tx!(input, output);
+    let tx = sign_tx(tx, &mut context, &script_args.payer, |s| {
+        Bytes::from(s.to_vec())
+    })
+    .expect("sign tx");
 
-    // Verify (should pass)
+    // Verify
     let cycles = verify_and_dump_failed_tx(&context, &tx, 10_000_000).expect("pass verification");
     println!("Refund success cycles: {}", cycles);
 }
 
 #[test]
 fn test_htlc_claim_failure_invalid_preimage() {
-    // Setup
-    let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("htlc");
-    let out_point = context.deploy_cell(contract_bin);
+    let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
 
-    let script_args = ScriptArgs::new(1000);
-    let args = script_args.build_args();
-
-    let invalid_preimage = PreimageWithHash::new(); // Different from what's in the lock
-
-    // Create script
-    let lock_script = context
-        .build_script(&out_point, args)
-        .expect("build script");
-
-    // Create HTLC cell with funds
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000u64.pack())
-            .lock(lock_script.clone())
-            .build(),
-        Bytes::new(),
-    );
-
-    // Setup transaction
+    // Create input cell
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
@@ -317,52 +264,26 @@ fn test_htlc_claim_failure_invalid_preimage() {
         .build();
 
     // Build transaction
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .output(output)
-        .output_data(Bytes::new().pack())
-        .build();
-    let tx = sign_claim_tx(
-        tx,
-        &mut context,
-        &script_args.payee,
-        (
-            invalid_preimage.preimage, // Use invalid preimage
-            script_args.preimages.1.preimage,
-        ),
-    )
+    let tx = create_tx!(input, output);
+    let tx = sign_tx(tx, &mut context, &script_args.payee, |s| {
+        build_claim_witness(
+            s,
+            &script_args.preimages.1.preimage,
+            &script_args.preimages.0.preimage, // Swap preimages to make it invalid
+        )
+    })
     .expect("sign tx");
 
-    // Verify (should fail due to invalid preimage)
+    // Verify
     let result = verify_and_dump_failed_tx(&context, &tx, 10_000_000);
     assert!(result.is_err(), "Claim with invalid preimage should fail");
 }
 
 #[test]
 fn test_htlc_refund_failure_before_timeout() {
-    // Setup
-    let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("htlc");
-    let out_point = context.deploy_cell(contract_bin);
+    let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
 
-    let script_args = ScriptArgs::new(1000);
-    let args = script_args.build_args();
-
-    // Create script
-    let lock_script = context
-        .build_script(&out_point, args)
-        .expect("build script");
-
-    // Create HTLC cell with funds
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000u64.pack())
-            .lock(lock_script.clone())
-            .build(),
-        Bytes::new(),
-    );
-
-    // Setup transaction with since value less than the locktime (not expired)
+    // Create input cell with since value less than the locktime (not expired)
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .since(500u64.pack()) // Less than the since in the contract
@@ -383,14 +304,13 @@ fn test_htlc_refund_failure_before_timeout() {
         .build();
 
     // Build transaction
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .output(output)
-        .output_data(Bytes::new().pack())
-        .build();
-    let tx = sign_refund_tx(tx, &mut context, &script_args.payer).expect("sign tx");
+    let tx = create_tx!(input, output);
+    let tx = sign_tx(tx, &mut context, &script_args.payer, |s| {
+        Bytes::from(s.to_vec())
+    })
+    .expect("sign tx");
 
-    // Verify (should fail due to timeout not reached)
+    // Verify
     let result = verify_and_dump_failed_tx(&context, &tx, 10_000_000);
     println!("Refund failure before timeout result: {:?}", result);
     assert!(result.is_err(), "Refund before timeout should fail");
