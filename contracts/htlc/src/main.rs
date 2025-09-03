@@ -4,13 +4,12 @@
 #[cfg(any(feature = "library", test))]
 extern crate alloc;
 
-use alloc::vec::Vec;
 use ckb_hash::blake2b_256;
 use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, prelude::*},
     error::SysError,
-    high_level::{load_script, load_transaction, load_witness_args, QueryIter},
+    high_level::{load_script, load_transaction, load_witness_args},
 };
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
 
@@ -31,11 +30,6 @@ const ARGS_SIZE: usize = PUBKEY_HASH_SIZE * 2 + HASH_SIZE * 2 + 8;
 
 const SIGNATURE_SIZE: usize = 65;
 const PREIMAGE_SIZE: usize = 32;
-
-const SECP256K1_DATA_HASH: [u8; 32] = [
-    0x9b, 0xd7, 0xe0, 0x6f, 0x3e, 0xcf, 0x4b, 0xe0, 0xf2, 0xfc, 0xd2, 0x18, 0x8b, 0x23, 0xf1, 0xb9,
-    0xfc, 0xc8, 0x8e, 0x5d, 0x4b, 0x65, 0xa8, 0x63, 0x7b, 0x17, 0x72, 0x3b, 0xbd, 0xa3, 0xcc, 0xe8,
-];
 
 #[repr(i8)]
 pub enum Error {
@@ -277,21 +271,10 @@ fn verify_signature(signature: &[u8], pubkey_hash: &[u8]) -> Result<(), Error> {
         return Err(Error::SignatureInvalid);
     }
 
-    // Load the transaction hash
+    // Load the transaction hash and create message
     let tx = load_transaction()?;
     let tx_hash = tx.calc_tx_hash();
-
-    // Load all witness hashes for the current lock script
-    let witness_hashes: Vec<[u8; 32]> = QueryIter::new(load_witness_args, Source::GroupInput)
-        .map(|witness| blake2b_256(&witness.as_slice()))
-        .collect();
-
-    // Create a secp256k1 message
-    let mut message_data = tx_hash.raw_data().to_vec();
-    for hash in witness_hashes {
-        message_data.extend_from_slice(&hash);
-    }
-    let message_hash = blake2b_256(&message_data);
+    let message_hash = blake2b_256(&tx_hash.as_slice());
 
     // Recover the public key
     let k256sig =

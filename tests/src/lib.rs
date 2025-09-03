@@ -3,8 +3,6 @@ use ckb_testtool::{
     ckb_types::{
         bytes::Bytes,
         core::{Cycle, TransactionView},
-        packed,
-        prelude::*,
     },
     context::Context,
 };
@@ -111,19 +109,4 @@ pub fn verify_and_dump_failed_tx(
         std::fs::write(path, json).expect("write");
     }
     result
-}
-
-pub fn build_and_sign_tx(
-    context: &mut Context,
-    tx: TransactionView,
-    witness: Bytes,
-) -> TransactionView {
-    let witness_args = packed::WitnessArgs::new_builder()
-        .lock(Some(witness).pack())
-        .build();
-    context.complete_tx(
-        tx.as_advanced_builder()
-            .witness(witness_args.as_bytes().pack())
-            .build(),
-    )
 }

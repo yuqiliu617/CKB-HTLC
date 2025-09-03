@@ -1,7 +1,12 @@
-use crate::{build_and_sign_tx, verify_and_dump_failed_tx, Loader};
+use crate::{verify_and_dump_failed_tx, Loader};
 use ckb_hash::blake2b_256;
 use ckb_testtool::{
-    ckb_types::{bytes::Bytes, core::TransactionBuilder, packed::*, prelude::*},
+    ckb_types::{
+        bytes::Bytes,
+        core::{TransactionBuilder, TransactionView},
+        packed::*,
+        prelude::*,
+    },
     context::Context,
 };
 use k256::{
@@ -89,20 +94,6 @@ impl ScriptArgs {
     }
 }
 
-// Generate the tx message hash for signing
-fn tx_message_hash(tx: &ckb_types::core::TransactionView) -> [u8; 32] {
-    let mut message_data = tx.hash().raw_data().to_vec();
-    let witnesses = tx.witnesses();
-
-    for idx in 0..witnesses.len() {
-        let witness = witnesses.get(idx).unwrap();
-        let witness_hash = blake2b_256(witness.raw_data().as_ref());
-        message_data.extend_from_slice(&witness_hash);
-    }
-
-    blake2b_256(&message_data)
-}
-
 // Creates witness data for claim (signature + preimages)
 fn build_claim_witness(
     signature: &[u8; SIGNATURE_SIZE],
@@ -116,9 +107,47 @@ fn build_claim_witness(
     Bytes::from(witness_data)
 }
 
-// Creates witness data for refund (signature only)
-fn build_refund_witness(signature: &[u8; SIGNATURE_SIZE]) -> Bytes {
-    Bytes::from(signature.to_vec())
+fn sign_claim_tx(
+    tx: TransactionView,
+    context: &mut Context,
+    signer: &KeyPair,
+    preimages: ([u8; PREIMAGE_SIZE], [u8; PREIMAGE_SIZE]),
+) -> Result<TransactionView, SigError> {
+    let tx_hash = tx.data().calc_tx_hash();
+    let message_hash = blake2b_256(&tx_hash.as_slice());
+
+    let signature = signer.sign(&message_hash)?;
+
+    let witness = build_claim_witness(&signature, &preimages.0, &preimages.1);
+    let witness_args = WitnessArgs::new_builder()
+        .lock(Some(witness).pack())
+        .build();
+    Ok(context.complete_tx(
+        tx.as_advanced_builder()
+            .witness(witness_args.as_bytes().pack())
+            .build(),
+    ))
+}
+
+fn sign_refund_tx(
+    tx: TransactionView,
+    context: &mut Context,
+    signer: &KeyPair,
+) -> Result<TransactionView, SigError> {
+    let tx_hash = tx.data().calc_tx_hash();
+    let message_hash = blake2b_256(&tx_hash.as_slice());
+
+    let signature = signer.sign(&message_hash)?;
+
+    let witness = Bytes::from(signature.to_vec());
+    let witness_args = WitnessArgs::new_builder()
+        .lock(Some(witness).pack())
+        .build();
+    Ok(context.complete_tx(
+        tx.as_advanced_builder()
+            .witness(witness_args.as_bytes().pack())
+            .build(),
+    ))
 }
 
 #[test]
@@ -170,30 +199,16 @@ fn test_htlc_claim_success() {
         .output(output)
         .output_data(Bytes::new().pack())
         .build();
-
-    let tx_with_dummy_witness = {
-        let dummy_witness = Bytes::from(vec![0u8; 65 + 32 * 2]);
-        let witness_args = WitnessArgs::new_builder()
-            .lock(Some(dummy_witness).pack())
-            .build();
-        tx.as_advanced_builder()
-            .witness(witness_args.as_bytes().pack())
-            .build()
-    };
-
-    // Calculate message hash and sign with payee's key
-    let message_hash = tx_message_hash(&tx_with_dummy_witness);
-    let signature = script_args.payee.sign(&message_hash).expect("sign");
-
-    // Create witness with signature and preimages
-    let witness = build_claim_witness(
-        &signature,
-        &script_args.preimages.0.preimage,
-        &script_args.preimages.1.preimage,
-    );
-
-    // Build final transaction
-    let tx = build_and_sign_tx(&mut context, tx, witness);
+    let tx = sign_claim_tx(
+        tx,
+        &mut context,
+        &script_args.payee,
+        (
+            script_args.preimages.0.preimage,
+            script_args.preimages.1.preimage,
+        ),
+    )
+    .expect("sign tx");
 
     // Verify (should pass)
     let cycles = verify_and_dump_failed_tx(&context, &tx, 10_000_000).expect("pass verification");
@@ -250,26 +265,7 @@ fn test_htlc_refund_success() {
         .output(output)
         .output_data(Bytes::new().pack())
         .build();
-
-    let tx_with_dummy_witness = {
-        let dummy_witness = Bytes::from(vec![0u8; 65]);
-        let witness_args = WitnessArgs::new_builder()
-            .lock(Some(dummy_witness).pack())
-            .build();
-        tx.as_advanced_builder()
-            .witness(witness_args.as_bytes().pack())
-            .build()
-    };
-
-    // Calculate message hash and sign with payer's key
-    let message_hash = tx_message_hash(&tx_with_dummy_witness);
-    let signature = script_args.payer.sign(&message_hash).expect("sign");
-
-    // Create witness with signature only
-    let witness = build_refund_witness(&signature);
-
-    // Build final transaction
-    let tx = build_and_sign_tx(&mut context, tx, witness);
+    let tx = sign_refund_tx(tx, &mut context, &script_args.payer).expect("sign tx");
 
     // Verify (should pass)
     let cycles = verify_and_dump_failed_tx(&context, &tx, 10_000_000).expect("pass verification");
@@ -327,30 +323,16 @@ fn test_htlc_claim_failure_invalid_preimage() {
         .output(output)
         .output_data(Bytes::new().pack())
         .build();
-
-    let tx_with_dummy_witness = {
-        let dummy_witness = Bytes::from(vec![0u8; 65 + 32 * 2]);
-        let witness_args = WitnessArgs::new_builder()
-            .lock(Some(dummy_witness).pack())
-            .build();
-        tx.as_advanced_builder()
-            .witness(witness_args.as_bytes().pack())
-            .build()
-    };
-
-    // Calculate message hash and sign with payee's key
-    let message_hash = tx_message_hash(&tx_with_dummy_witness);
-    let signature = script_args.payee.sign(&message_hash).expect("sign");
-
-    // Create witness with signature and invalid preimage
-    let witness = build_claim_witness(
-        &signature,
-        &script_args.preimages.0.preimage,
-        &invalid_preimage.preimage,
-    );
-
-    // Build final transaction
-    let tx = build_and_sign_tx(&mut context, tx, witness);
+    let tx = sign_claim_tx(
+        tx,
+        &mut context,
+        &script_args.payee,
+        (
+            invalid_preimage.preimage, // Use invalid preimage
+            script_args.preimages.1.preimage,
+        ),
+    )
+    .expect("sign tx");
 
     // Verify (should fail due to invalid preimage)
     let result = verify_and_dump_failed_tx(&context, &tx, 10_000_000);
@@ -407,28 +389,10 @@ fn test_htlc_refund_failure_before_timeout() {
         .output(output)
         .output_data(Bytes::new().pack())
         .build();
-
-    let tx_with_dummy_witness = {
-        let dummy_witness = Bytes::from(vec![0u8; 65]);
-        let witness_args = WitnessArgs::new_builder()
-            .lock(Some(dummy_witness).pack())
-            .build();
-        tx.as_advanced_builder()
-            .witness(witness_args.as_bytes().pack())
-            .build()
-    };
-
-    // Calculate message hash and sign with payer's key
-    let message_hash = tx_message_hash(&tx_with_dummy_witness);
-    let signature = script_args.payer.sign(&message_hash).expect("sign");
-
-    // Create witness with signature only
-    let witness = build_refund_witness(&signature);
-
-    // Build final transaction
-    let tx = build_and_sign_tx(&mut context, tx, witness);
+    let tx = sign_refund_tx(tx, &mut context, &script_args.payer).expect("sign tx");
 
     // Verify (should fail due to timeout not reached)
     let result = verify_and_dump_failed_tx(&context, &tx, 10_000_000);
+    println!("Refund failure before timeout result: {:?}", result);
     assert!(result.is_err(), "Refund before timeout should fail");
 }
