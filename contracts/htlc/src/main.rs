@@ -8,6 +8,7 @@ use ckb_hash::blake2b_256;
 use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, prelude::*},
+    debug,
     error::SysError,
     high_level::{load_script, load_tx_hash, load_witness_args},
 };
@@ -32,6 +33,7 @@ const SIGNATURE_SIZE: usize = 65;
 const PREIMAGE_SIZE: usize = 32;
 
 #[repr(i8)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     // System errors
     IndexOutOfBound = 1,
@@ -201,7 +203,10 @@ impl<'a> ScriptArgs<'a> {
 pub fn program_entry() -> i8 {
     match run() {
         Ok(_) => 0,
-        Err(e) => e as i8,
+        Err(e) => {
+            debug!("Error: {:?}", e);
+            e as i8
+        }
     }
 }
 
