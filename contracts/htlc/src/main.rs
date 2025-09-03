@@ -53,6 +53,9 @@ pub enum Error {
     SinceInvalid,
     PreimageInvalid,
     SignatureInvalid,
+    WrongSinceFormat,
+    ClaimExpired,
+    RefundNotReady,
 }
 
 impl From<SysError> for Error {
@@ -104,12 +107,76 @@ impl<'a> Action<'a> {
     }
 }
 
+#[repr(u8)]
+#[derive(PartialEq)]
+enum SinceMetric {
+    BlockNumber,
+    EpochNumber,
+    Timestamp,
+    Invalid,
+}
+
+impl SinceMetric {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => SinceMetric::BlockNumber,
+            1 => SinceMetric::EpochNumber,
+            2 => SinceMetric::Timestamp,
+            _ => SinceMetric::Invalid,
+        }
+    }
+}
+
+#[derive(PartialEq)]
+struct Since {
+    absolute: bool,
+    metric: SinceMetric,
+    value: u64,
+}
+
+impl Since {
+    fn from_u64(since: u64) -> Result<Self, Error> {
+        let absolute = (since & (1 << 63)) == 0;
+        let metric = SinceMetric::from_u8(((since >> 61) & 0b11) as u8);
+        let reserved = ((since >> 56) & 0b0001_1111) as u8;
+        let value = since & 0x00FF_FFFF_FFFF_FFFF;
+
+        if metric == SinceMetric::Invalid || reserved != 0 {
+            Err(Error::SinceInvalid)
+        } else {
+            Ok(Since {
+                absolute,
+                metric,
+                value,
+            })
+        }
+    }
+
+    fn comparable(&self) -> bool {
+        self.absolute && self.metric != SinceMetric::EpochNumber
+    }
+}
+
+impl PartialOrd for Since {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        if self.absolute
+            && other.absolute
+            && self.metric == other.metric
+            && self.metric != SinceMetric::EpochNumber
+        {
+            self.value.partial_cmp(&other.value)
+        } else {
+            None
+        }
+    }
+}
+
 struct ScriptArgs<'a> {
     payer_pubkey_hash: &'a [u8],
     payee_pubkey_hash: &'a [u8],
     hash1: &'a [u8],
     hash2: &'a [u8],
-    since: u64,
+    since: Since,
 }
 
 impl<'a> ScriptArgs<'a> {
@@ -125,7 +192,10 @@ impl<'a> ScriptArgs<'a> {
 
         let mut since_buf = [0u8; 8];
         since_buf.copy_from_slice(&args[PUBKEY_HASH_SIZE * 2 + HASH_SIZE * 2..]);
-        let since = u64::from_le_bytes(since_buf);
+        let since = Since::from_u64(u64::from_le_bytes(since_buf))?;
+        if !since.comparable() {
+            return Err(Error::WrongSinceFormat);
+        }
 
         Ok(ScriptArgs {
             payer_pubkey_hash,
@@ -158,7 +228,13 @@ fn run() -> Result<(), Error> {
         .unpack();
     let action = Action::from_bytes(&witness_lock)?;
 
-    let tx_since = ckb_std::high_level::load_input_since(0, Source::GroupInput)?;
+    let tx_since = Since::from_u64(ckb_std::high_level::load_input_since(
+        0,
+        Source::GroupInput,
+    )?)?;
+    if !tx_since.comparable() || tx_since.metric != args.since.metric {
+        return Err(Error::WrongSinceFormat);
+    }
 
     match action {
         Action::Claim {
@@ -167,8 +243,8 @@ fn run() -> Result<(), Error> {
             preimage2,
         } => {
             // Verify since: must be before timeout
-            if tx_since != 0 && tx_since >= args.since {
-                return Err(Error::SinceInvalid);
+            if tx_since >= args.since {
+                return Err(Error::ClaimExpired);
             }
 
             // Verify preimages
@@ -182,16 +258,16 @@ fn run() -> Result<(), Error> {
             }
 
             // Verify payee signature
-            verify_signature(args.payee_pubkey_hash, signature)
+            verify_signature(signature, args.payee_pubkey_hash)
         }
         Action::Refund { signature } => {
             // Verify since: must be at or after timeout
             if tx_since < args.since {
-                return Err(Error::SinceInvalid);
+                return Err(Error::RefundNotReady);
             }
 
             // Verify payer signature
-            verify_signature(args.payer_pubkey_hash, signature)
+            verify_signature(signature, args.payer_pubkey_hash)
         }
     }
 }
@@ -201,7 +277,7 @@ fn run() -> Result<(), Error> {
 /// This function reproduces the standard CKB signature verification process.
 /// It constructs the message to be signed by hashing the transaction hash
 /// with the hashes of all witnesses that share the current lock script.
-fn verify_signature(expected_pubkey_hash: &[u8], signature: &[u8]) -> Result<(), Error> {
+fn verify_signature(signature: &[u8], pubkey_hash: &[u8]) -> Result<(), Error> {
     if signature.len() != SIGNATURE_SIZE {
         return Err(Error::SignatureInvalid);
     }
@@ -234,8 +310,8 @@ fn verify_signature(expected_pubkey_hash: &[u8], signature: &[u8]) -> Result<(),
     let pubkey = sig.recover(message).map_err(|_| Error::SignatureInvalid)?;
 
     // Hash the recovered public key and compare with the expected hash
-    let pubkey_hash = blake2b_256(&pubkey.serialize()[1..]);
-    if pubkey_hash.as_slice() != expected_pubkey_hash {
+    let actual_pubkey_hash = blake2b_256(&pubkey.serialize()[1..]);
+    if actual_pubkey_hash.as_slice() != pubkey_hash {
         return Err(Error::SignatureInvalid);
     }
 
