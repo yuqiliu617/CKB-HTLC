@@ -40,8 +40,8 @@ impl KeyPair {
         }
     }
 
-    fn sign(&self, message_hash: &[u8; 32]) -> Result<[u8; SIGNATURE_SIZE], SigError> {
-        let (signature, recovery_id) = self.signing_key.sign_recoverable(message_hash)?;
+    fn sign(&self, prehash: &[u8; 32]) -> Result<[u8; SIGNATURE_SIZE], SigError> {
+        let (signature, recovery_id) = self.signing_key.sign_prehash_recoverable(prehash)?;
         let mut sig_bytes = [0u8; SIGNATURE_SIZE];
         sig_bytes[0..64].copy_from_slice(&signature.to_bytes());
         sig_bytes[64] = recovery_id.to_byte();

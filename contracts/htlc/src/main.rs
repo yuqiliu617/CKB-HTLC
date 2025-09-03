@@ -9,7 +9,7 @@ use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, prelude::*},
     error::SysError,
-    high_level::{load_script, load_transaction, load_witness_args},
+    high_level::{load_script, load_tx_hash, load_witness_args},
 };
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
 
@@ -271,16 +271,12 @@ fn verify_signature(signature: &[u8], pubkey_hash: &[u8]) -> Result<(), Error> {
         return Err(Error::SignatureInvalid);
     }
 
-    // Load the transaction hash and create message
-    let tx = load_transaction()?;
-    let tx_hash = tx.calc_tx_hash();
-    let message_hash = blake2b_256(&tx_hash.as_slice());
-
     // Recover the public key
+    let tx_hash = load_tx_hash()?;
     let k256sig =
         K256Signature::from_slice(&signature[0..64]).map_err(|_| Error::SignatureInvalid)?;
     let recovery_id = RecoveryId::from_byte(signature[SIGNATURE_SIZE - 1]).unwrap();
-    let pubkey = VerifyingKey::recover_from_prehash(&message_hash, &k256sig, recovery_id)
+    let pubkey = VerifyingKey::recover_from_prehash(&tx_hash.as_slice(), &k256sig, recovery_id)
         .map_err(|_| Error::SignatureInvalid)?;
 
     // Verify the public key hash
