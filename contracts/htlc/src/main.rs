@@ -217,9 +217,11 @@ pub fn program_entry() -> i8 {
 fn run() -> Result<(), Error> {
     let script = load_script()?;
 
+    // Parse script args
     let args_bytes: Bytes = script.args().unpack();
     let args = ScriptArgs::from_bytes(&args_bytes)?;
 
+    // Parse witness lock
     let witness_args = load_witness_args(0, Source::GroupInput)?;
     let witness_lock: Bytes = witness_args
         .lock()
@@ -228,6 +230,7 @@ fn run() -> Result<(), Error> {
         .unpack();
     let action = Action::from_bytes(&witness_lock)?;
 
+    // Verify tx_since
     let tx_since = Since::from_u64(ckb_std::high_level::load_input_since(
         0,
         Source::GroupInput,
@@ -272,11 +275,6 @@ fn run() -> Result<(), Error> {
     }
 }
 
-/// Verifies a secp256k1 signature.
-///
-/// This function reproduces the standard CKB signature verification process.
-/// It constructs the message to be signed by hashing the transaction hash
-/// with the hashes of all witnesses that share the current lock script.
 fn verify_signature(signature: &[u8], pubkey_hash: &[u8]) -> Result<(), Error> {
     if signature.len() != SIGNATURE_SIZE {
         return Err(Error::SignatureInvalid);
@@ -291,25 +289,21 @@ fn verify_signature(signature: &[u8], pubkey_hash: &[u8]) -> Result<(), Error> {
         .map(|witness| blake2b_256(&witness.as_slice()))
         .collect();
 
-    // Combine the transaction hash and witness hashes to form the message
+    // Create a secp256k1 message
     let mut message_data = tx_hash.raw_data().to_vec();
     for hash in witness_hashes {
         message_data.extend_from_slice(&hash);
     }
     let message_hash = blake2b_256(&message_data);
-
-    // Create a secp256k1 message
     let message = Message::from_digest(message_hash);
 
-    // Extract recovery ID and signature
+    // Recover the public key
     let recovery_id = RecoveryId::from_u8_masked(signature[SIGNATURE_SIZE - 1]);
     let sig = RecoverableSignature::from_compact(&signature[0..64], recovery_id)
         .map_err(|_| Error::SignatureInvalid)?;
-
-    // Recover the public key
     let pubkey = sig.recover(message).map_err(|_| Error::SignatureInvalid)?;
 
-    // Hash the recovered public key and compare with the expected hash
+    // Verify the public key hash
     let actual_pubkey_hash = blake2b_256(&pubkey.serialize()[1..]);
     if actual_pubkey_hash.as_slice() != pubkey_hash {
         return Err(Error::SignatureInvalid);
