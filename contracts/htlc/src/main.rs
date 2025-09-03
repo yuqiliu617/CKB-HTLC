@@ -31,6 +31,7 @@ const ARGS_SIZE: usize = PUBKEY_HASH_SIZE * 2 + HASH_SIZE * 2 + 8;
 
 const SIGNATURE_SIZE: usize = 65;
 const PREIMAGE_SIZE: usize = 32;
+const CLAIM_WITNESS_SIZE: usize = SIGNATURE_SIZE + PREIMAGE_SIZE * 2;
 
 #[repr(i8)]
 #[derive(Debug, PartialEq)]
@@ -66,8 +67,7 @@ impl From<SysError> for Error {
 enum Action<'a> {
     Claim {
         signature: &'a [u8],
-        preimage1: &'a [u8],
-        preimage2: &'a [u8],
+        preimages: (&'a [u8], &'a [u8]),
     },
     Refund {
         signature: &'a [u8],
@@ -76,27 +76,23 @@ enum Action<'a> {
 
 impl<'a> Action<'a> {
     fn from_bytes(witness_lock: &'a [u8]) -> Result<Self, Error> {
-        if witness_lock.len() < SIGNATURE_SIZE {
+        if witness_lock.len() != SIGNATURE_SIZE && witness_lock.len() != CLAIM_WITNESS_SIZE {
             return Err(Error::WitnessInvalid);
         }
 
         let signature = &witness_lock[0..SIGNATURE_SIZE];
-        if witness_lock.len() == SIGNATURE_SIZE {
-            Ok(Action::Refund { signature })
+        Ok(if witness_lock.len() == SIGNATURE_SIZE {
+            Action::Refund { signature }
         } else {
-            let preimages = &witness_lock[SIGNATURE_SIZE..];
-            if preimages.len() != PREIMAGE_SIZE * 2 {
-                Err(Error::WitnessInvalid)
-            } else {
-                let preimage1 = &preimages[0..PREIMAGE_SIZE];
-                let preimage2 = &preimages[PREIMAGE_SIZE..PREIMAGE_SIZE * 2];
-                Ok(Action::Claim {
-                    signature,
-                    preimage1,
-                    preimage2,
-                })
+            let preimage_bytes = &witness_lock[SIGNATURE_SIZE..];
+            Action::Claim {
+                signature,
+                preimages: (
+                    &preimage_bytes[0..PREIMAGE_SIZE],
+                    &preimage_bytes[PREIMAGE_SIZE..PREIMAGE_SIZE * 2],
+                ),
             }
-        }
+        })
     }
 }
 
@@ -238,8 +234,7 @@ fn run() -> Result<(), Error> {
     match action {
         Action::Claim {
             signature,
-            preimage1,
-            preimage2,
+            preimages,
         } => {
             // Verify since: must be before timeout
             if tx_since >= args.since {
@@ -247,8 +242,8 @@ fn run() -> Result<(), Error> {
             }
 
             // Verify preimages
-            let calculated_hash1 = blake2b_256(preimage1);
-            let calculated_hash2 = blake2b_256(preimage2);
+            let calculated_hash1 = blake2b_256(preimages.0);
+            let calculated_hash2 = blake2b_256(preimages.1);
 
             if args.hash1 != calculated_hash1.as_slice()
                 || args.hash2 != calculated_hash2.as_slice()
