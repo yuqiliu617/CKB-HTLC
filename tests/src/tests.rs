@@ -113,20 +113,19 @@ fn sign_claim_tx(
     signer: &KeyPair,
     preimages: ([u8; PREIMAGE_SIZE], [u8; PREIMAGE_SIZE]),
 ) -> Result<TransactionView, SigError> {
-    let tx_hash = tx.data().calc_tx_hash();
-    let message_hash = blake2b_256(&tx_hash.as_slice());
+    let complete_tx = context.complete_tx(tx);
 
-    let signature = signer.sign(&message_hash)?;
+    let tx_hash = complete_tx.hash();
+    let signature = signer.sign(tx_hash.as_slice().try_into().unwrap())?;
 
     let witness = build_claim_witness(&signature, &preimages.0, &preimages.1);
     let witness_args = WitnessArgs::new_builder()
         .lock(Some(witness).pack())
         .build();
-    Ok(context.complete_tx(
-        tx.as_advanced_builder()
-            .witness(witness_args.as_bytes().pack())
-            .build(),
-    ))
+    Ok(complete_tx
+        .as_advanced_builder()
+        .witness(witness_args.as_bytes().pack())
+        .build())
 }
 
 fn sign_refund_tx(
@@ -134,20 +133,20 @@ fn sign_refund_tx(
     context: &mut Context,
     signer: &KeyPair,
 ) -> Result<TransactionView, SigError> {
-    let tx_hash = tx.data().calc_tx_hash();
-    let message_hash = blake2b_256(&tx_hash.as_slice());
+    let complete_tx = context.complete_tx(tx);
 
-    let signature = signer.sign(&message_hash)?;
+    let tx_hash = complete_tx.hash();
+    let signature = signer.sign(tx_hash.as_slice().try_into().unwrap())?;
 
     let witness = Bytes::from(signature.to_vec());
     let witness_args = WitnessArgs::new_builder()
         .lock(Some(witness).pack())
         .build();
-    Ok(context.complete_tx(
-        tx.as_advanced_builder()
-            .witness(witness_args.as_bytes().pack())
-            .build(),
-    ))
+
+    Ok(complete_tx
+        .as_advanced_builder()
+        .witness(witness_args.as_bytes().pack())
+        .build())
 }
 
 #[test]
