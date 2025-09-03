@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-native-simulator = [ "ckb-testtool/native-simulator" ]
+native-simulator = ["ckb-testtool/native-simulator"]
 
 [dependencies]
-ckb-testtool = "0.15.0"
+ckb-hash = "0.202.0"
+ckb-testtool = "0.16.0"
+ckb-types = "0.202.0"
+k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
 serde_json = "1.0"
