@@ -205,42 +205,6 @@ fn test_htlc_claim_success() {
 }
 
 #[test]
-fn test_htlc_refund_success() {
-    let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
-
-    // Create input cell
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .since(script_args.since.pack()) // Set since value to match or exceed the locktime
-        .build();
-
-    // Create output cell controlled by payer
-    let payer_out_point = context.deploy_cell(Bytes::from(vec![0]));
-    let payer_lock_script = context
-        .build_script(
-            &payer_out_point,
-            Bytes::from(script_args.payee.pubkey_hash.to_vec()),
-        )
-        .expect("payer script");
-
-    let output = CellOutput::new_builder()
-        .capacity(990u64.pack()) // Account for transaction fee
-        .lock(payer_lock_script)
-        .build();
-
-    // Build transaction
-    let tx = create_tx!(input, output);
-    let tx = sign_tx(tx, &mut context, &script_args.payer, |s| {
-        Bytes::from(s.to_vec())
-    })
-    .expect("sign tx");
-
-    // Verify
-    let cycles = verify_and_dump_failed_tx(&context, &tx, 10_000_000).expect("pass verification");
-    println!("Refund success cycles: {}", cycles);
-}
-
-#[test]
 fn test_htlc_claim_failure_invalid_preimage() {
     let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
 
@@ -280,6 +244,82 @@ fn test_htlc_claim_failure_invalid_preimage() {
 }
 
 #[test]
+fn test_htlc_claim_failure_expired() {
+    let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
+
+    // Create input cell
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point)
+        .since(1500u64.pack()) // Set since value greater than the locktime (expired)
+        .build();
+
+    // Create output cell controlled by payee
+    let payee_out_point = context.deploy_cell(Bytes::from(vec![0]));
+    let payee_lock_script = context
+        .build_script(
+            &payee_out_point,
+            Bytes::from(script_args.payee.pubkey_hash.to_vec()),
+        )
+        .expect("payee script");
+
+    let output = CellOutput::new_builder()
+        .capacity(990u64.pack())
+        .lock(payee_lock_script)
+        .build();
+
+    // Build transaction
+    let tx = create_tx!(input, output);
+    let tx = sign_tx(tx, &mut context, &script_args.payee, |s| {
+        build_claim_witness(
+            s,
+            &script_args.preimages.0.preimage,
+            &script_args.preimages.1.preimage, // Swap preimages to make it invalid
+        )
+    })
+    .expect("sign tx");
+
+    // Verify
+    let result = verify_and_dump_failed_tx(&context, &tx, 10_000_000);
+    assert!(result.is_err(), "Claim after timeout should fail");
+}
+
+#[test]
+fn test_htlc_refund_success() {
+    let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
+
+    // Create input cell
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point)
+        .since(script_args.since.pack()) // Set since value to match or exceed the locktime
+        .build();
+
+    // Create output cell controlled by payer
+    let payer_out_point = context.deploy_cell(Bytes::from(vec![0]));
+    let payer_lock_script = context
+        .build_script(
+            &payer_out_point,
+            Bytes::from(script_args.payee.pubkey_hash.to_vec()),
+        )
+        .expect("payer script");
+
+    let output = CellOutput::new_builder()
+        .capacity(990u64.pack()) // Account for transaction fee
+        .lock(payer_lock_script)
+        .build();
+
+    // Build transaction
+    let tx = create_tx!(input, output);
+    let tx = sign_tx(tx, &mut context, &script_args.payer, |s| {
+        Bytes::from(s.to_vec())
+    })
+    .expect("sign tx");
+
+    // Verify
+    let cycles = verify_and_dump_failed_tx(&context, &tx, 10_000_000).expect("pass verification");
+    println!("Refund success cycles: {}", cycles);
+}
+
+#[test]
 fn test_htlc_refund_failure_before_timeout() {
     let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
 
@@ -312,6 +352,41 @@ fn test_htlc_refund_failure_before_timeout() {
 
     // Verify
     let result = verify_and_dump_failed_tx(&context, &tx, 10_000_000);
-    println!("Refund failure before timeout result: {:?}", result);
     assert!(result.is_err(), "Refund before timeout should fail");
+}
+
+#[test]
+fn test_htlc_refund_failure_invalid_signature() {
+    let (mut context, script_args, input_out_point) = setup_test_context(1000, 1000);
+
+    // Create input cell
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point)
+        .since(script_args.since.pack()) // Set since value to match or exceed the locktime
+        .build();
+
+    // Create output cell controlled by payer
+    let payer_out_point = context.deploy_cell(Bytes::from(vec![0]));
+    let payer_lock_script = context
+        .build_script(
+            &payer_out_point,
+            Bytes::from(script_args.payee.pubkey_hash.to_vec()),
+        )
+        .expect("payer script");
+
+    let output = CellOutput::new_builder()
+        .capacity(990u64.pack()) // Account for transaction fee
+        .lock(payer_lock_script)
+        .build();
+
+    // Build transaction
+    let tx = create_tx!(input, output);
+    let tx = sign_tx(tx, &mut context, &script_args.payee, |s| {
+        Bytes::from(s.to_vec())
+    })
+    .expect("sign tx"); // Use payee's key to sign, making the signature invalid
+
+    // Verify
+    let result = verify_and_dump_failed_tx(&context, &tx, 10_000_000);
+    assert!(result.is_err(), "Refund with invalid signature should fail");
 }
